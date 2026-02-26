@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/process?secret=YOUR_PROCESS_SECRET&limit=20",
+      "schedule": "*/10 * * * *"
+    }
+  ]
+}
