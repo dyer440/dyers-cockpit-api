@@ -6,15 +6,15 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-function mustEnv(name: string) {
+function getEnv(name: string) {
+  return process.env[name] || "";
+}
+
+function mustEnvRuntime(name: string) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
   return v;
 }
-
-const PROCESS_SECRET = mustEnv("COCKPIT_PROCESS_SECRET");
-const OPENAI_API_KEY = mustEnv("OPENAI_API_KEY");
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
 function clampLimit(n: any, def = 20) {
   const x = Number(n);
@@ -47,7 +47,15 @@ async function fetchText(url: string) {
   return ct.includes("text/html") ? stripHtml(body) : body;
 }
 
-async function callOpenAI(inputText: string, url: string, vertical: string) {
+async function callOpenAI(opts: {
+  apiKey: string;
+  model: string;
+  inputText: string;
+  url: string;
+  vertical: string;
+}) {
+  const { apiKey, model, inputText, url, vertical } = opts;
+
   const prompt = `
 You are a news analyst for ${vertical.toUpperCase()} markets.
 
@@ -69,11 +77,11 @@ ${inputText.slice(0, 12000)}
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: OPENAI_MODEL,
+      model,
       input: prompt,
       response_format: { type: "json_object" },
     }),
@@ -86,10 +94,8 @@ ${inputText.slice(0, 12000)}
 
   const data: any = await r.json();
 
-  // Try the most robust path first
   if (data?.output_json && typeof data.output_json === "object") return data.output_json;
 
-  // Otherwise reconstruct output text
   const outputText =
     data?.output_text ??
     data?.output
@@ -108,7 +114,7 @@ ${inputText.slice(0, 12000)}
   }
 }
 
-async function processBatch(limit: number) {
+async function processBatch(limit: number, apiKey: string, model: string) {
   const picked = await pool.query(
     `
     select id, vertical, url
@@ -131,9 +137,8 @@ async function processBatch(limit: number) {
       await pool.query(`update raw_items set status='processing' where id=$1`, [rawId]);
 
       const content = await fetchText(url);
-      const out = await callOpenAI(content, url, vertical);
+      const out = await callOpenAI({ apiKey, model, inputText: content, url, vertical });
 
-      // Minimal validation
       const summary_1 = String(out?.summary_1 ?? "").trim();
       const bullets = Array.isArray(out?.bullets) ? out.bullets : [];
       if (!summary_1) throw new Error("Model output missing summary_1");
@@ -159,7 +164,7 @@ async function processBatch(limit: number) {
           JSON.stringify(out?.entities ?? {}),
           Number(out?.relevance_score ?? 0),
           out?.visibility ?? "public",
-          OPENAI_MODEL,
+          model,
         ]
       );
 
@@ -183,37 +188,55 @@ async function processBatch(limit: number) {
 }
 
 export async function GET(req: Request) {
-  const u = new URL(req.url);
-  const secret = u.searchParams.get("secret");
-  if (secret !== PROCESS_SECRET) return new Response("Unauthorized", { status: 401 });
+  try {
+    const u = new URL(req.url);
 
-  const limit = clampLimit(u.searchParams.get("limit"), 20);
-  const out = await processBatch(limit);
+    const processSecret = mustEnvRuntime("COCKPIT_PROCESS_SECRET");
+    const secret = u.searchParams.get("secret");
+    if (secret !== processSecret) return new Response("Unauthorized", { status: 401 });
 
-  return Response.json({
-    ok: true,
-    mode: "cron_get",
-    limit,
-    picked: out.picked,
-    processed: out.results.length,
-    results: out.results,
-  });
+    const apiKey = mustEnvRuntime("OPENAI_API_KEY");
+    const model = getEnv("OPENAI_MODEL") || "gpt-4.1-mini";
+
+    const limit = clampLimit(u.searchParams.get("limit"), 20);
+    const out = await processBatch(limit, apiKey, model);
+
+    return Response.json({
+      ok: true,
+      mode: "cron_get",
+      limit,
+      picked: out.picked,
+      processed: out.results.length,
+      results: out.results,
+    });
+  } catch (e: any) {
+    return new Response(String(e?.message ?? e), { status: 500 });
+  }
 }
 
 export async function POST(req: Request) {
-  const secret = req.headers.get("x-cockpit-secret");
-  if (secret !== PROCESS_SECRET) return new Response("Unauthorized", { status: 401 });
+  try {
+    const processSecret = mustEnvRuntime("COCKPIT_PROCESS_SECRET");
+    const secret = req.headers.get("x-cockpit-secret");
+    if (secret !== processSecret) return new Response("Unauthorized", { status: 401 });
 
-  const body = await req.json().catch(() => ({}));
-  const limit = clampLimit(body?.limit, 20);
-  const out = await processBatch(limit);
+    const apiKey = mustEnvRuntime("OPENAI_API_KEY");
+    const model = getEnv("OPENAI_MODEL") || "gpt-4.1-mini";
 
-  return Response.json({
-    ok: true,
-    mode: "manual_post",
-    limit,
-    picked: out.picked,
-    processed: out.results.length,
-    results: out.results,
-  });
+    const body = await req.json().catch(() => ({}));
+    const limit = clampLimit(body?.limit, 20);
+
+    const out = await processBatch(limit, apiKey, model);
+
+    return Response.json({
+      ok: true,
+      mode: "manual_post",
+      limit,
+      picked: out.picked,
+      processed: out.results.length,
+      results: out.results,
+    });
+  } catch (e: any) {
+    return new Response(String(e?.message ?? e), { status: 500 });
+  }
 }
