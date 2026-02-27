@@ -39,6 +39,7 @@ export async function POST(req: Request) {
 
     const urlHash = crypto.createHash("sha256").update(url).digest("hex");
 
+    // Merge caller metadata with posted_at (always include posted_at)
     const incomingMeta =
       body?.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
         ? body.metadata
@@ -49,15 +50,28 @@ export async function POST(req: Request) {
       posted_at: body.posted_at ?? incomingMeta.posted_at ?? null,
     };
 
-    const result = await pool.query(
+    // Insert-first to preserve inserted=true/false for Discord reactions.
+    // If conflict, update metadata by merging jsonb so RSS can enrich duplicates.
+    const q = await pool.query(
       `
-      INSERT INTO raw_items
-        (vertical, url, url_hash, source, source_channel_id, source_message_id, author_id, author_username, metadata)
-      VALUES
-        ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
-      ON CONFLICT (url_hash) DO UPDATE
-        SET metadata = coalesce(raw_items.metadata,'{}'::jsonb) || excluded.metadata
-      RETURNING id
+      with ins as (
+        insert into raw_items
+          (vertical, url, url_hash, source, source_channel_id, source_message_id, author_id, author_username, metadata)
+        values
+          ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+        on conflict (url_hash) do nothing
+        returning id
+      ),
+      upd as (
+        update raw_items
+        set metadata = coalesce(raw_items.metadata,'{}'::jsonb) || $9::jsonb
+        where url_hash = $3
+          and not exists (select 1 from ins)
+        returning id
+      )
+      select
+        (select id from ins) as inserted_id,
+        (select id from upd) as updated_id
       `,
       [
         vertical,
@@ -72,15 +86,10 @@ export async function POST(req: Request) {
       ]
     );
 
-    // With DO UPDATE, rowCount will be 1 even on dedupe; treat inserted as "new row" only if you want.
-    // If you still want "inserted" semantics, you need a different pattern. For now we’ll return inserted=false only
-    // when we cannot determine easily. We'll expose "upserted" which is always true when rowCount=1.
-    const upserted = result.rowCount === 1;
-    const id = upserted ? result.rows[0].id : null;
+    const inserted = !!q.rows?.[0]?.inserted_id;
+    const id = q.rows?.[0]?.inserted_id ?? q.rows?.[0]?.updated_id ?? null;
 
-    // If you really care about inserted vs updated, we can add an extra select to compare created_at,
-    // but it's not needed for pipeline correctness.
-    return Response.json({ ok: true, upserted, id, stored_metadata: metadata });
+    return Response.json({ ok: true, inserted, id });
   } catch (err: any) {
     console.error(err);
     return new Response(String(err?.message ?? "Server Error"), { status: 500 });
