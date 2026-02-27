@@ -2,7 +2,6 @@
   "crons": [
     {
       "path": "/api/process?secret=supersecret134466&limit=20",
-      "schedule": "*/10 * * * *"
     }
   ]
   
