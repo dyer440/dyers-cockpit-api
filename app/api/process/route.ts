@@ -1,7 +1,5 @@
 import { Pool } from "pg";
 
-
-
 export const runtime = "nodejs";
 
 const pool = new Pool({
