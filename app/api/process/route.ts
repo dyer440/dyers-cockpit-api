@@ -35,16 +35,18 @@ async function fetchText(url: string) {
   const res = await fetch(url, {
     redirect: "follow",
     headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; DyersCockpitBot/1.0; +https://dyerempire.com)",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
+      "User-Agent":
+        "Mozilla/5.0 (compatible; DyersCockpitBot/1.0; +https://dyerempire.com)",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
   });
 
   const ct = res.headers.get("content-type") || "";
   const body = await res.text();
 
-    if (!res.ok) throw new Error(`Fetch failed ${res.status}`);
-  
+  if (!res.ok) throw new Error(`Fetch failed ${res.status}`);
+
   return ct.includes("text/html") ? stripHtml(body) : body;
 }
 
@@ -143,7 +145,6 @@ async function processBatch(limit: number, apiKey: string, model: string) {
       const summary_1 = String(out?.summary_1 ?? "").trim();
       const bullets = Array.isArray(out?.bullets) ? out.bullets : [];
       if (!summary_1) throw new Error("Model output missing summary_1");
-      if (!res.ok) throw new Error(`Fetch failed ${res.status}`);
       if (bullets.length !== 5) throw new Error("Model output bullets must be exactly 5");
       
 
