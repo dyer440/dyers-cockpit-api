@@ -1,5 +1,4 @@
 import { Pool } from "pg";
-const BUILD_ID = "2026-02-26T23:59Z";
 
 export const runtime = "nodejs";
 
