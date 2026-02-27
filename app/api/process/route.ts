@@ -280,96 +280,108 @@ async function pickRawItems(limit: number): Promise<Array<{ id: number; vertical
 }
 
 async function processBatch(limit: number, apiKey: string, model: string) {
-  const rows = await pickRawItems(limit);
+  const picked = await pool.query(
+    `
+    select id, vertical, url
+    from raw_items
+    where status = 'new'
+    order by created_at asc
+    limit $1
+    `,
+    [limit]
+  );
 
   const results: Array<{ id: number; ok: boolean; error?: string }> = [];
 
-  for (const row of rows) {
+  for (const row of picked.rows) {
     const rawId = Number(row.id);
-    const vertical = toLowerSafe(row.vertical) || "ree";
+    const vertical = String(row.vertical || "").toLowerCase();
     const url = String(row.url || "");
 
-try {
-  const content = await fetchText(url);
+    try {
+      await pool.query(`update raw_items set status='processing' where id=$1`, [rawId]);
 
-  // Skip expensive model call if content is clearly unusable (blocked, stub page, etc.)
-  const contentLen = (content || "").trim().length;
-  if (contentLen < 800) {
-    await pool.query(
-      `
-      update raw_items
-      set status = case when status = 'processed' then 'processed' else 'error' end,
-          last_error = $2
-      where id = $1
-      `,
-      [rawId, `Content too short (${contentLen} chars)`]
-    );
+      const content = await fetchText(url);
 
-    results.push({
-      id: rawId,
-      ok: false,
-      error: `Content too short (${contentLen} chars)`,
-    });
-    continue; // move to next row in the for-loop
+      const contentLen = (content || "").trim().length;
+      if (contentLen < 800) {
+        await pool.query(
+          `
+          update raw_items
+          set status = case when status = 'processed' then 'processed' else 'error' end,
+              last_error = $2
+          where id = $1
+          `,
+          [rawId, `Content too short (${contentLen} chars)`]
+        );
+
+        results.push({
+          id: rawId,
+          ok: false,
+          error: `Content too short (${contentLen} chars)`,
+        });
+        continue; // safe: inside the for-loop
+      }
+
+      const out = await callOpenAI({ apiKey, model, inputText: content, url, vertical });
+
+      const summary_1 = normalizeSummary(out?.summary_1);
+      const bullets = normalizeBullets(out?.bullets);
+      const title = normalizeTitle(out?.title);
+      const why = normalizeWhy(out?.why_it_matters);
+      const tags = normalizeTags(out?.tags);
+      const entities = normalizeEntities(out?.entities);
+      const relevance_score = clampInt(out?.relevance_score, 0, 0, 100);
+      const visibility = normalizeVisibility(out?.visibility);
+
+      await pool.query(
+        `
+        insert into processed_items
+          (raw_item_id, vertical, url, title, summary_1, bullets, why_it_matters, tags, entities, relevance_score, visibility, model)
+        values
+          ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11,$12)
+        on conflict (raw_item_id) do nothing
+        `,
+        [
+          rawId,
+          vertical,
+          url,
+          title,
+          summary_1,
+          JSON.stringify(bullets),
+          why,
+          JSON.stringify(tags),
+          JSON.stringify(entities),
+          relevance_score,
+          visibility,
+          model,
+        ]
+      );
+
+      await pool.query(
+        `update raw_items set status='processed', processed_at=now(), last_error=null where id=$1`,
+        [rawId]
+      );
+
+      results.push({ id: rawId, ok: true });
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+
+      await pool.query(
+        `
+        update raw_items
+        set status = case when status = 'processed' then 'processed' else 'error' end,
+            last_error = $2
+        where id = $1
+        `,
+        [rawId, msg.slice(0, 5000)]
+      );
+
+      results.push({ id: rawId, ok: false, error: msg });
+    }
   }
 
-  const out = await callOpenAI({ apiKey, model, inputText: content, url, vertical });
-
-  const summary_1 = normalizeSummary(out?.summary_1);
-  const bullets = normalizeBullets(out?.bullets);
-  const title = normalizeTitle(out?.title);
-  const why = normalizeWhy(out?.why_it_matters);
-  const tags = normalizeTags(out?.tags);
-  const entities = normalizeEntities(out?.entities);
-  const relevance_score = clampInt(out?.relevance_score, 0, 0, 100);
-  const visibility = normalizeVisibility(out?.visibility);
-
-  await pool.query(
-    `
-    insert into processed_items
-      (raw_item_id, vertical, url, title, summary_1, bullets, why_it_matters, tags, entities, relevance_score, visibility, model)
-    values
-      ($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb,$9::jsonb,$10,$11,$12)
-    on conflict (raw_item_id) do nothing
-    `,
-    [
-      rawId,
-      vertical,
-      url,
-      title,
-      summary_1,
-      JSON.stringify(bullets),
-      why,
-      JSON.stringify(tags),
-      JSON.stringify(entities),
-      relevance_score,
-      visibility,
-      model,
-    ]
-  );
-
-  await pool.query(
-    `update raw_items set status='processed', processed_at=now(), last_error=null where id=$1`,
-    [rawId]
-  );
-
-  results.push({ id: rawId, ok: true });
-} catch (e: any) {
-  const msg = String(e?.message ?? e);
-
-  // If the row is already 'processed' (race or retry), don't downgrade it.
-  // Otherwise, mark error.
-  await pool.query(
-    `
-    update raw_items
-    set status = case when status = 'processed' then 'processed' else 'error' end,
-        last_error = $2
-    where id = $1
-    `,
-    [rawId, msg.slice(0, 5000)]
-  );
-
-  results.push({ id: rawId, ok: false, error: msg });
+  return { picked: picked.rowCount, results };
 }
 
 // ---------- handlers ----------
