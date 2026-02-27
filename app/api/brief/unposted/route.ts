@@ -42,7 +42,7 @@ export async function GET(req: Request) {
       where vertical = $1
         and visibility = 'public'
         and posted_at is null
-      order by created_at asc
+      order by created_at desc
       limit $2
       `,
       [vertical, limit]
