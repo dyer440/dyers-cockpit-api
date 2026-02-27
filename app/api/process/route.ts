@@ -99,18 +99,26 @@ const ALLOWED_VIS = new Set(["public", "pro", "internal"]);
 
 function normalizeTags(tags: any): string[] {
   if (!Array.isArray(tags)) return ["Other"];
-  const cleaned = tags
-    .map((t) => String(t ?? "").trim())
-    .filter((t) => t.length > 0)
-    .map((t) => {
-      // Normalize simple casing variants
-      const match = [...ALLOWED_TAGS].find((x) => x.toLowerCase() === t.toLowerCase());
-      return match || "";
-    })
-    .filter((t) => ALLOWED_TAGS.has(t));
-  // Keep unique, max 8
-  const uniq = Array.from(new Set(cleaned)).slice(0, 8);
-  return uniq.length ? uniq : ["Other"];
+
+  const cleaned: string[] = [];
+
+  for (const raw of tags) {
+    const t = String(raw ?? "").trim();
+    if (!t) continue;
+
+    let match = "";
+    ALLOWED_TAGS.forEach((x) => {
+      if (!match && x.toLowerCase() === t.toLowerCase()) {
+        match = x;
+      }
+    });
+
+    if (match && cleaned.indexOf(match) === -1) {
+      cleaned.push(match);
+    }
+  }
+
+  return cleaned.length ? cleaned.slice(0, 8) : ["Other"];
 }
 
 function normalizeVisibility(v: any): "public" | "pro" | "internal" {
