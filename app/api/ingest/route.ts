@@ -15,6 +15,12 @@ function requireEnv(name: string) {
 
 const SECRET = requireEnv("COCKPIT_INGEST_SECRET");
 
+function normVertical(v: any) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "ree" || s === "coal" || s === "policy") return s;
+  return s || "ree";
+}
+
 export async function POST(req: Request) {
   try {
     const headerSecret = req.headers.get("x-cockpit-secret");
@@ -22,21 +28,29 @@ export async function POST(req: Request) {
       return new Response("Unauthorized", { status: 401 });
     }
 
-    const body = await req.json();
+    const body = await req.json().catch(() => ({}));
 
     if (!body?.url || !body?.vertical) {
-      return new Response("Bad Request: url and vertical required", {
-        status: 400,
-      });
+      return new Response("Bad Request: url and vertical required", { status: 400 });
     }
 
     const url = String(body.url).trim();
-    const vertical = String(body.vertical).trim().toLowerCase();
+    const vertical = normVertical(body.vertical);
 
-    const urlHash = crypto
-      .createHash("sha256")
-      .update(url)
-      .digest("hex");
+    const urlHash = crypto.createHash("sha256").update(url).digest("hex");
+
+    // Merge metadata:
+    // - allow callers (rss/manual/etc.) to send metadata object
+    // - always include posted_at
+    const incomingMeta =
+      body?.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
+        ? body.metadata
+        : {};
+
+    const metadata = {
+      ...incomingMeta,
+      posted_at: body.posted_at ?? incomingMeta.posted_at ?? null,
+    };
 
     const result = await pool.query(
       `
@@ -56,9 +70,7 @@ export async function POST(req: Request) {
         body.source_message_id ?? null,
         body.author_id ?? null,
         body.author_username ?? null,
-        JSON.stringify({
-          posted_at: body.posted_at ?? null,
-        }),
+        JSON.stringify(metadata),
       ]
     );
 
@@ -68,6 +80,6 @@ export async function POST(req: Request) {
     return Response.json({ ok: true, inserted, id });
   } catch (err: any) {
     console.error(err);
-    return new Response("Server Error", { status: 500 });
+    return new Response(String(err?.message ?? "Server Error"), { status: 500 });
   }
 }
