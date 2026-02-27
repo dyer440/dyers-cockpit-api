@@ -39,9 +39,6 @@ export async function POST(req: Request) {
 
     const urlHash = crypto.createHash("sha256").update(url).digest("hex");
 
-    // Merge metadata:
-    // - allow callers (rss/manual/etc.) to send metadata object
-    // - always include posted_at
     const incomingMeta =
       body?.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
         ? body.metadata
@@ -58,7 +55,8 @@ export async function POST(req: Request) {
         (vertical, url, url_hash, source, source_channel_id, source_message_id, author_id, author_username, metadata)
       VALUES
         ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
-      ON CONFLICT (url_hash) DO NOTHING
+      ON CONFLICT (url_hash) DO UPDATE
+        SET metadata = coalesce(raw_items.metadata,'{}'::jsonb) || excluded.metadata
       RETURNING id
       `,
       [
@@ -74,10 +72,15 @@ export async function POST(req: Request) {
       ]
     );
 
-    const inserted = result.rowCount === 1;
-    const id = inserted ? result.rows[0].id : null;
+    // With DO UPDATE, rowCount will be 1 even on dedupe; treat inserted as "new row" only if you want.
+    // If you still want "inserted" semantics, you need a different pattern. For now we’ll return inserted=false only
+    // when we cannot determine easily. We'll expose "upserted" which is always true when rowCount=1.
+    const upserted = result.rowCount === 1;
+    const id = upserted ? result.rows[0].id : null;
 
-    return Response.json({ ok: true, inserted, id });
+    // If you really care about inserted vs updated, we can add an extra select to compare created_at,
+    // but it's not needed for pipeline correctness.
+    return Response.json({ ok: true, upserted, id, stored_metadata: metadata });
   } catch (err: any) {
     console.error(err);
     return new Response(String(err?.message ?? "Server Error"), { status: 500 });
