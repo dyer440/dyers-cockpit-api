@@ -10,10 +10,10 @@ function mustEnv(name: string) {
   return v;
 }
 
-function clampLimit(n: any, def = 50) {
+function clampLimit(n: any, def = 100) {
   const x = Number(n);
   if (!Number.isFinite(x) || x <= 0) return def;
-  return Math.max(1, Math.min(200, Math.floor(x)));
+  return Math.max(1, Math.min(500, Math.floor(x)));
 }
 
 export async function GET(req: Request) {
@@ -29,8 +29,13 @@ export async function GET(req: Request) {
       `
       select id, vertical, name, url, poll_interval_min, etag, last_modified
       from sources
-      where enabled = true and type = 'rss'
-      order by id asc
+      where enabled = true
+        and type = 'rss'
+        and (
+          last_polled_at is null
+          or last_polled_at <= now() - make_interval(mins => poll_interval_min)
+        )
+      order by last_polled_at nulls first, id asc
       limit $1
       `,
       [limit]
